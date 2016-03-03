@@ -8,48 +8,63 @@
 #include <linux/sched.h>	// allows access to task_struct
 #include <linux/list.h>		// used for struct list_head
 #include <linux/kfifo.h>	// added for kfifo
+#include <linux/slab.h>		// added for kmalloc
 
 MODULE_LICENSE("GPL");
 
-//DEFINE_KFIFO(fifo, int, PAGE_SIZE);
+DEFINE_KFIFO(fifo, int, PAGE_SIZE);
 
 // declare global variable to allow start and stop kthread
 struct task_struct *my_task;
 
-// declare int for count of children in a task
-int count = 0;
+// declare int for count of elements in a tree
+int tcount = 0;
 
-int tree_walk(struct task_struct *p) {
+int tree_queue(struct task_struct *p) {
 
 	// declare unsigned int for enqueuing pids
-	//unsigned int pid2q;
+	unsigned int pid2q;
 
 	// declare list for iterating thru children
 	struct list_head *pos;
 
 	// iterate through each child and traverse their children
 	list_for_each(pos, &p->children) {
-		tree_walk(list_entry(pos, struct task_struct, sibling));
+		tree_queue(list_entry(pos, struct task_struct, sibling));
 	} 
 
-	/*----Debugging Statement----*/
-	printk(KERN_INFO "Queuing: %i\n", (int) p->pid);
+	// print PID of process being queued to kernel log
+	printk(KERN_INFO "%i\n", (int) p->pid);
 	
-	//check that current task is not shell process
-	//if ( (int) p->parent->pid > 1) {
-	//	pid2q = (int) p->pid;
-	//	kfifo_in(&fifo, &pid2q, sizeof(pid2q));
-	//}
+	pid2q = (int) p->pid;
+	kfifo_in(&fifo, &pid2q, sizeof(pid2q));
 
-	count++;
+	return 0;
+}
+
+int tree_count(struct task_struct *p) {
+
+	// declare list for iterating thru children
+	struct list_head *pos;
+
+	// iterate through each child and traverse their children
+	list_for_each(pos, &p->children) {
+		tree_count(list_entry(pos, struct task_struct, sibling));
+	} 
+
+	tcount++;
 
 	return 0;
 }
 
 int my_kthread_function(void *data) {
 	
-	//int threshold = 10;
+	int threshold = 80;
+	int fifo_val = 0;
 	struct task_struct *current_task;	
+
+	// allocate string to store task_struct comm value
+	char * cname = (char *) kmalloc(64, GFP_KERNEL);
 
 	/*----Debugging Statement----*/
 	printk(KERN_INFO "Entering kthread function\n");
@@ -58,29 +73,55 @@ int my_kthread_function(void *data) {
 	while(!kthread_should_stop()) {
 		
 		for_each_process(current_task) {
+			tcount = 0;
+			sprintf(cname, "%s", current_task->parent->comm);
 
-			// not to be used on consumer producer code
-			//kfifo_reset(&fifo);
-
-			// check if grandparent is init // && (int) current_task->parent->parent->pid == 1
-			if ((int) current_task->pid > 100 ) {
-				count = 0;
-
-				// begin recursive traveral of current task
-				tree_walk(current_task);
+			// traverse if task has children and the task's parent is bash
+			if (!list_empty(&current_task->children) 
+				&& (int) current_task->pid > 100 
+				&& cname[0] == 'b' && cname[1] == 'a'
+				&& cname[2] == 's' && cname[3] == 'h') {
 
 				/*----Debugging Statement----*/
-				if (count > 1)
-					printk(KERN_INFO "PID: %i #Children: %i\n", (int) current_task->pid, count-1);
-	
+				printk(KERN_INFO "Possible fork bomb: %i\n", current_task->pid); 
+
+				// begin tree count of current task
+				tree_count(current_task);
+
+				if (tcount > threshold) {
+					
+					// begin queuing current task tree
+					tree_queue(current_task);
+
+					/*----Debugging Statement----*/
+					kfifo_peek(&fifo, &fifo_val);
+					printk(KERN_INFO "First fork node queued: %i Length: %i\n", fifo_val,  tcount);
+					printk(KERN_INFO "Parent PID: %i\n", (int) current_task->pid);
+
+					// break from for_each_process
+					break;
+				}
+				else {
+
+					/*----Debugging Statement----*/
+					printk(KERN_INFO "False alarm");
+
+					// reset fifo if threshold is not met
+					kfifo_reset(&fifo);
+				}
 			}	
-		}	
+		} // end for_each_process
+
 		msleep(10000);
 	}
-	return 0;
-}
 
-static int __init my_module_init(void) {
+	// free cname allocated from kmalloc
+	kfree(cname);
+
+	return 0;
+} // end my_kthread_function
+
+static int __init treewalk_init(void) {
 	
 	int data = 20;
 
@@ -90,3 +131,13 @@ static int __init my_module_init(void) {
 	my_task = kthread_run(&my_kthread_function,(void *) &data,"my_module");
 	return 0;
 }
+
+static void __exit treewalk_exit(void) {
+	kthread_stop(my_task);
+	printk(KERN_INFO "----Module removed----\n");
+}
+
+module_init(treewalk_init);
+module_exit(treewalk_exit);
+
+/*   -- End of my_module.c --   */
